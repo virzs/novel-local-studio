@@ -1,0 +1,26 @@
+[package]
+name = "nls-app"
+version = "0.0.0"
+description = "Novel Local Studio"
+authors = ["Novel Local Studio"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "nls_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "process", "io-util", "macros", "rt-multi-thread", "time"] }
+portpicker = "0.1"
+dirs = "5"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"

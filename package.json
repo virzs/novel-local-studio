@@ -1,0 +1,36 @@
+{
+  "name": "novel-local-studio",
+  "version": "0.0.0",
+  "private": true,
+  "description": "AI-first local-first novel writing desktop app (Tauri + React + Mastra)",
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "ensure:native": "tsx scripts/ensure-native-abi.ts",
+    "predev": "pnpm ensure:native",
+    "predev:web": "pnpm ensure:native",
+    "predev:mastra": "pnpm ensure:native",
+    "dev": "pnpm build:mastra && pnpm --filter @nls/app tauri dev",
+    "dev:mastra": "pnpm --filter @nls/mastra dev",
+    "dev:web": "concurrently -n mastra,web -c magenta,cyan --kill-others-on-fail \"pnpm dev:mastra\" \"pnpm --filter @nls/app dev\"",
+    "build:mastra": "pnpm --filter @nls/mastra build",
+    "build:node": "tsx scripts/download-node.ts",
+    "build:resources": "tsx scripts/prepare-resources.ts",
+    "build:prepare": "pnpm build:mastra && pnpm build:node && pnpm build:resources",
+    "build": "pnpm build:prepare && pnpm --filter @nls/app tauri build",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "tsx": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  }
+}

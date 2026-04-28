@@ -1,0 +1,18 @@
+{
+  "name": "novel-local-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm run build:sidecar && node scripts/with-env.mjs pnpm --dir app dev:tauri",
+    "dev:web": "node scripts/with-env.mjs concurrently -k -n mastra,api,web \"pnpm --filter @novel-local-studio/mastra dev\" \"node scripts/dev-api.mjs\" \"pnpm --dir app dev\"",
+    "dev:desktop": "pnpm run build:sidecar && node scripts/with-env.mjs pnpm --dir app dev:tauri",
+    "dev:mastra": "node scripts/with-env.mjs pnpm --filter @novel-local-studio/mastra dev",
+    "dev:services": "node scripts/dev-services.mjs",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "build": "pnpm run build:sidecar && pnpm --dir app build:tauri"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
