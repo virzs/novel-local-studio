@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"Default capability for main window","local":true,"windows":["main"],"permissions":["core:default",{"identifier":"shell:allow-execute","allow":[{"args":true,"name":"binaries/mastra-server","sidecar":true}]},{"identifier":"shell:allow-spawn","allow":[{"args":true,"name":"binaries/mastra-server","sidecar":true}]}]}}

@@ -1,6 +1,0 @@
-packages:
-  - app
-  - mastra
-
-patchedDependencies:
-  '@mastra/core@1.17.0': patches/@mastra__core@1.17.0.patch
