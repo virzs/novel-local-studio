@@ -12,6 +12,7 @@ export function setEmbedHooks(hooks: EmbedHooks): void {
 }
 
 export type DocumentKind = 'folder' | 'chapter' | 'setting' | 'outline' | 'note';
+export type DocumentStatus = 'active' | 'archived' | 'deleted';
 
 export type Book = {
   id: string;
@@ -46,6 +47,9 @@ export type DocumentRow = {
   content: string;
   wordCount: number;
   orderIndex: number;
+  status: DocumentStatus;
+  archivedAt: number | null;
+  deletedAt: number | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -128,10 +132,85 @@ export async function updateDocument(input: UpdateDocumentInput): Promise<Docume
 
 export async function deleteDocument(id: string): Promise<boolean> {
   const c = getLibSqlClient();
+  const cur = await getDocument(id);
+  if (!cur) return false;
+  if (cur.status === 'deleted') return false;
+  const now = Date.now();
+  const subtreeIds = await collectSubtreeIds(id);
+  const placeholders = subtreeIds.map(() => '?').join(',');
+  await c.execute({
+    sql: `UPDATE document
+          SET status = 'deleted', deleted_at = ?, updated_at = ?
+          WHERE id IN (${placeholders}) AND status != 'deleted'`,
+    args: [now, now, ...subtreeIds],
+  });
+  for (const subId of subtreeIds) _hooks.onDelete?.(subId);
+  return true;
+}
+
+export async function archiveDocument(id: string): Promise<boolean> {
+  const c = getLibSqlClient();
+  const cur = await getDocument(id);
+  if (!cur) return false;
+  if (cur.status !== 'active') return false;
+  const now = Date.now();
+  const subtreeIds = await collectSubtreeIds(id);
+  const placeholders = subtreeIds.map(() => '?').join(',');
+  await c.execute({
+    sql: `UPDATE document
+          SET status = 'archived', archived_at = ?, updated_at = ?
+          WHERE id IN (${placeholders}) AND status = 'active'`,
+    args: [now, now, ...subtreeIds],
+  });
+  for (const subId of subtreeIds) _hooks.onDelete?.(subId);
+  return true;
+}
+
+export async function restoreDocument(id: string): Promise<boolean> {
+  const c = getLibSqlClient();
+  const cur = await getDocument(id);
+  if (!cur) return false;
+  if (cur.status === 'active') return false;
+  const now = Date.now();
+  const subtreeIds = await collectSubtreeIds(id);
+  const placeholders = subtreeIds.map(() => '?').join(',');
+  await c.execute({
+    sql: `UPDATE document
+          SET status = 'active', archived_at = NULL, deleted_at = NULL, updated_at = ?
+          WHERE id IN (${placeholders}) AND status != 'active'`,
+    args: [now, ...subtreeIds],
+  });
+  for (const subId of subtreeIds) _hooks.onUpsert?.(subId);
+  return true;
+}
+
+export async function purgeDocument(id: string): Promise<boolean> {
+  const c = getLibSqlClient();
+  const subtreeIds = await collectSubtreeIds(id);
   const r = await c.execute({ sql: 'DELETE FROM document WHERE id = ?', args: [id] });
-  const deleted = r.rowsAffected > 0;
-  if (deleted) _hooks.onDelete?.(id);
-  return deleted;
+  const purged = r.rowsAffected > 0;
+  if (purged) {
+    for (const subId of subtreeIds) _hooks.onDelete?.(subId);
+  }
+  return purged;
+}
+
+async function collectSubtreeIds(rootId: string): Promise<string[]> {
+  const c = getLibSqlClient();
+  const result: string[] = [rootId];
+  let frontier: string[] = [rootId];
+  while (frontier.length > 0) {
+    const placeholders = frontier.map(() => '?').join(',');
+    const r = await c.execute({
+      sql: `SELECT id FROM document WHERE parent_id IN (${placeholders})`,
+      args: frontier,
+    });
+    const next = r.rows.map((row) => (row as unknown as { id: string }).id);
+    if (next.length === 0) break;
+    result.push(...next);
+    frontier = next;
+  }
+  return result;
 }
 
 function rowToBook(r: Record<string, unknown>): Book {
@@ -156,6 +235,9 @@ function rowToDoc(r: Record<string, unknown>): DocumentRow {
     content: (r.content as string) ?? '',
     wordCount: Number(r.word_count ?? 0),
     orderIndex: Number(r.order_index ?? 0),
+    status: ((r.status as string) ?? 'active') as DocumentStatus,
+    archivedAt: r.archived_at !== null && r.archived_at !== undefined ? Number(r.archived_at) : null,
+    deletedAt: r.deleted_at !== null && r.deleted_at !== undefined ? Number(r.deleted_at) : null,
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
   };
@@ -215,11 +297,29 @@ export async function deleteBook(id: string): Promise<boolean> {
   return r.rowsAffected > 0;
 }
 
-export async function getDocumentTree(bookId: string): Promise<DocumentNode[]> {
+export type GetDocumentTreeOptions = {
+  rootId?: string | null;
+  depth?: number;
+  includeArchived?: boolean;
+  includeDeleted?: boolean;
+};
+
+export async function getDocumentTree(
+  bookId: string,
+  options: GetDocumentTreeOptions = {},
+): Promise<DocumentNode[]> {
+  const { rootId = null, depth, includeArchived = false, includeDeleted = false } = options;
   const c = getLibSqlClient();
+  const statusClauses: string[] = ["status = 'active'"];
+  if (includeArchived) statusClauses.push("status = 'archived'");
+  if (includeDeleted) statusClauses.push("status = 'deleted'");
+  const statusFilter = statusClauses.join(' OR ');
   const r = await c.execute({
-    sql: `SELECT id, book_id, parent_id, kind, title, word_count, order_index, created_at, updated_at
-          FROM document WHERE book_id = ? ORDER BY order_index ASC, created_at ASC`,
+    sql: `SELECT id, book_id, parent_id, kind, title, word_count, order_index,
+                 status, archived_at, deleted_at, created_at, updated_at
+          FROM document
+          WHERE book_id = ? AND (${statusFilter})
+          ORDER BY order_index ASC, created_at ASC`,
     args: [bookId],
   });
   const nodes: DocumentNode[] = r.rows.map((row) => {
@@ -232,7 +332,14 @@ export async function getDocumentTree(bookId: string): Promise<DocumentNode[]> {
     if (n.parentId && byId.has(n.parentId)) byId.get(n.parentId)!.children.push(n);
     else roots.push(n);
   }
-  return roots;
+  const startNodes: DocumentNode[] = rootId ? (byId.has(rootId) ? [byId.get(rootId)!] : []) : roots;
+  if (depth === undefined || depth < 0) return startNodes;
+  return pruneDepth(startNodes, depth);
+}
+
+function pruneDepth(nodes: DocumentNode[], remaining: number): DocumentNode[] {
+  if (remaining <= 0) return nodes.map((n) => ({ ...n, children: [] }));
+  return nodes.map((n) => ({ ...n, children: pruneDepth(n.children, remaining - 1) }));
 }
 
 export async function getDocument(id: string): Promise<DocumentRow | null> {

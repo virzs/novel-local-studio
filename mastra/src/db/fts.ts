@@ -27,18 +27,38 @@ export function setupFtsSchema(): void {
       content,
       tokenize = 'trigram'
     );
-
-    CREATE TRIGGER IF NOT EXISTS document_ai AFTER INSERT ON document BEGIN
+  `);
+  db.exec(`
+    DROP TRIGGER IF EXISTS document_ai;
+    DROP TRIGGER IF EXISTS document_au;
+    DROP TRIGGER IF EXISTS document_ad;
+    DROP TRIGGER IF EXISTS document_status_au;
+  `);
+  db.exec(`
+    CREATE TRIGGER document_ai AFTER INSERT ON document
+    WHEN new.status = 'active'
+    BEGIN
       INSERT INTO document_fts(document_id, book_id, kind, title, content)
       VALUES (new.id, new.book_id, new.kind, new.title, new.content);
     END;
 
-    CREATE TRIGGER IF NOT EXISTS document_au AFTER UPDATE OF title, content ON document BEGIN
+    CREATE TRIGGER document_au AFTER UPDATE OF title, content ON document
+    WHEN new.status = 'active'
+    BEGIN
       UPDATE document_fts SET title = new.title, content = new.content WHERE document_id = new.id;
     END;
 
-    CREATE TRIGGER IF NOT EXISTS document_ad AFTER DELETE ON document BEGIN
+    CREATE TRIGGER document_ad AFTER DELETE ON document BEGIN
       DELETE FROM document_fts WHERE document_id = old.id;
+    END;
+
+    CREATE TRIGGER document_status_au AFTER UPDATE OF status ON document
+    WHEN old.status != new.status
+    BEGIN
+      DELETE FROM document_fts WHERE document_id = new.id;
+      INSERT INTO document_fts(document_id, book_id, kind, title, content)
+      SELECT new.id, new.book_id, new.kind, new.title, new.content
+      WHERE new.status = 'active';
     END;
   `);
 }
@@ -48,7 +68,7 @@ export function backfillFts(): number {
   const existing = db.prepare('SELECT COUNT(*) AS n FROM document_fts').get() as { n: number };
   if (existing.n > 0) return 0;
   const rows = db
-    .prepare('SELECT id, book_id, kind, title, content FROM document')
+    .prepare("SELECT id, book_id, kind, title, content FROM document WHERE status = 'active'")
     .all() as Array<{ id: string; book_id: string; kind: string; title: string; content: string }>;
   const stmt = db.prepare(
     'INSERT INTO document_fts(document_id, book_id, kind, title, content) VALUES (?, ?, ?, ?, ?)',

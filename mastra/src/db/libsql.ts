@@ -55,6 +55,23 @@ export async function runBusinessMigrations(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_document_book_parent
     ON document(book_id, parent_id, order_index)
   `);
+
+  const documentColumns = await c.execute('PRAGMA table_info(document)');
+  const docCols = documentColumns.rows.map((row) => row.name as string);
+  if (!docCols.includes('status')) {
+    await c.execute(`ALTER TABLE document ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
+  }
+  if (!docCols.includes('archived_at')) {
+    await c.execute('ALTER TABLE document ADD COLUMN archived_at INTEGER');
+  }
+  if (!docCols.includes('deleted_at')) {
+    await c.execute('ALTER TABLE document ADD COLUMN deleted_at INTEGER');
+  }
+  await c.execute(`
+    CREATE INDEX IF NOT EXISTS idx_document_status
+    ON document(book_id, status)
+  `);
+
   await c.execute(`
     CREATE TABLE IF NOT EXISTS app_kv (
       key TEXT PRIMARY KEY,

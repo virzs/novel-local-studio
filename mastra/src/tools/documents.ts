@@ -7,6 +7,8 @@ import {
   createDocument,
   updateDocument,
   deleteDocument,
+  archiveDocument,
+  restoreDocument,
   getBook,
 } from '../db/books.ts';
 import { readBookIdFromContext } from '../shared/request-context.ts';
@@ -81,12 +83,29 @@ export const getActiveBookTool = createTool({
 export const getDocumentTreeTool = createTool({
   id: 'getDocumentTree',
   description:
-    '返回某本书的文档树（不含正文）。bookId 省略时使用当前选中的书。kind 可能是 folder/chapter/setting/outline/note。',
-  inputSchema: z.object({ bookId: z.string().optional() }),
-  execute: async ({ bookId }, ctx) => {
+    '返回某本书的文档树（不含正文）。bookId 省略时使用当前选中的书。kind 可能是 folder/chapter/setting/outline/note。\n' +
+    '为了节省 token，**强烈建议在你只关心子树时传 rootId 限定范围**（例如核查"角色"目录下的人物档时，传该 folder 的 id）。\n' +
+    'depth 控制返回深度：省略=完整子树，0=只返回 rootId 节点本身（不带 children），1=根 + 直接子节点，依此类推。\n' +
+    '默认只返回 status=active 的文档。需要看归档/回收站时显式传 includeArchived / includeDeleted。',
+  inputSchema: z.object({
+    bookId: z.string().optional(),
+    rootId: z.string().nullable().optional(),
+    depth: z.number().int().nonnegative().optional(),
+    includeArchived: z.boolean().optional(),
+    includeDeleted: z.boolean().optional(),
+  }),
+  execute: async ({ bookId, rootId, depth, includeArchived, includeDeleted }, ctx) => {
     const target = bookId ?? readBookIdFromContext(ctx);
     if (!target) throw new Error('bookId 缺失：请先在左侧选中一本书或显式传入 bookId');
-    return { bookId: target, tree: await getDocumentTree(target) };
+    return {
+      bookId: target,
+      tree: await getDocumentTree(target, {
+        rootId: rootId ?? null,
+        depth,
+        includeArchived,
+        includeDeleted,
+      }),
+    };
   },
 });
 
@@ -120,6 +139,31 @@ export const createDocumentTool = createTool({
   },
 });
 
+export const createFolderTool = createTool({
+  id: 'createFolder',
+  description:
+    '在指定书籍下创建一个分类文件夹（kind 固定为 folder，无正文）。用于组织设定层文档（如在"设定"下建"角色""物品""地点""势力"等子目录）。bookId 省略时使用当前选中的书。parentId 通常指向"设定"根文档；orderIndex 省略则追加到末尾。',
+  inputSchema: z.object({
+    bookId: z.string().optional(),
+    parentId: z.string().nullable().optional(),
+    title: z.string().min(1),
+    orderIndex: z.number().int().nonnegative().optional(),
+  }),
+  execute: async (input, ctx) => {
+    const bookId = input.bookId ?? readBookIdFromContext(ctx);
+    if (!bookId) throw new Error('bookId 缺失：请先在左侧选中一本书或显式传入 bookId');
+    return {
+      document: await createDocument({
+        bookId,
+        parentId: input.parentId ?? null,
+        kind: 'folder',
+        title: input.title,
+        orderIndex: input.orderIndex,
+      }),
+    };
+  },
+});
+
 export const updateDocumentTool = createTool({
   id: 'updateDocument',
   description:
@@ -140,9 +184,29 @@ export const updateDocumentTool = createTool({
 
 export const deleteDocumentTool = createTool({
   id: 'deleteDocument',
-  description: '删除指定文档（若为文件夹则其子文档需自行处理；当前实现不级联）。',
+  description:
+    '把指定文档移入回收站（软删，**可恢复**，不会真正抹除数据）。若是 folder，子树会一同标记为 deleted。\n' +
+    '默认 getDocumentTree 不会再返回这些文档，但搜索/向量也会自动跳过它们。如要还原请用 restoreDocument。',
   inputSchema: z.object({ id: z.string() }),
   execute: async ({ id }) => ({ deleted: await deleteDocument(id) }),
+});
+
+export const archiveDocumentTool = createTool({
+  id: 'archiveDocument',
+  description:
+    '把指定文档标记为"已归档"（保留原层级位置，**不删除**）。归档后默认 tree/搜索/向量都跳过它，但仍可还原。\n' +
+    '适用场景：阶段性配角/物品在某卷之后不再活跃；早期版本被新版替代但想留作参考；用户明确说"先收起来不删"。\n' +
+    '若是 folder，子树会一同标记为 archived。要还原用 restoreDocument。',
+  inputSchema: z.object({ id: z.string() }),
+  execute: async ({ id }) => ({ archived: await archiveDocument(id) }),
+});
+
+export const restoreDocumentTool = createTool({
+  id: 'restoreDocument',
+  description:
+    '把已归档或已软删的文档恢复成 active。若是 folder，子树会一同恢复。',
+  inputSchema: z.object({ id: z.string() }),
+  execute: async ({ id }) => ({ restored: await restoreDocument(id) }),
 });
 
 export const readOnlyDocumentTools = {
@@ -154,8 +218,11 @@ export const readOnlyDocumentTools = {
 
 export const writeDocumentTools = {
   createDocument: createDocumentTool,
+  createFolder: createFolderTool,
   updateDocument: updateDocumentTool,
   deleteDocument: deleteDocumentTool,
+  archiveDocument: archiveDocumentTool,
+  restoreDocument: restoreDocumentTool,
 };
 
 export const allDocumentTools = {

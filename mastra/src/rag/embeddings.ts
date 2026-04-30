@@ -165,7 +165,7 @@ export async function backfillEmbeddings(): Promise<{
   const r = await c.execute(
     `SELECT d.id FROM document d
      LEFT JOIN document_embedding_state s ON s.document_id = d.id
-     WHERE d.content != '' AND (s.document_id IS NULL OR s.content_updated_at < d.updated_at)`,
+     WHERE d.status = 'active' AND d.content != '' AND (s.document_id IS NULL OR s.content_updated_at < d.updated_at)`,
   );
   let embedded = 0;
   let skipped = 0;

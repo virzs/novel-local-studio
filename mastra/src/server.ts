@@ -6,11 +6,15 @@ import { Mastra } from '@mastra/core/mastra';
 import { handleChatStream, type ChatStreamHandlerParams } from '@mastra/ai-sdk';
 import { RequestContext } from '@mastra/core/request-context';
 import { createUIMessageStreamResponse, generateText } from 'ai';
+import { convertMessages } from '@mastra/core/agent';
 import { createOpenAI } from '@ai-sdk/openai';
 import { z } from 'zod';
 import type { AppRequestContextValues } from './shared/request-context.ts';
 import { getMastraStorage, getMastraMemory } from './db/mastra-store.ts';
 import { parseArgs } from './util/args.ts';
+import { installConsoleCapture, getRecentLogs, subscribeLogs, type LogEntry } from './logs.ts';
+
+installConsoleCapture();
 import { initLibSqlClient, runBusinessMigrations, getDbPath } from './db/libsql.ts';
 import { initFtsDb, setupFtsSchema, backfillFts, closeFtsDb } from './db/fts.ts';
 import { initVectorStore, getVectorStore, ensureNovelIndex, VECTOR_DIMENSION } from './db/vector.ts';
@@ -22,6 +26,10 @@ import {
   deleteBook,
   getDocumentTree,
   getDocument,
+  archiveDocument,
+  restoreDocument,
+  deleteDocument,
+  purgeDocument,
   seedSampleBookIfEmpty,
   setEmbedHooks,
 } from './db/books.ts';
@@ -243,6 +251,56 @@ async function main() {
     }),
   );
 
+  app.get('/api/logs', (c) => {
+    const sinceParam = c.req.query('since');
+    const sinceId = sinceParam ? Number(sinceParam) : undefined;
+    return c.json({ entries: getRecentLogs(Number.isFinite(sinceId) ? sinceId : undefined) });
+  });
+
+  app.get('/api/logs/stream', (c) => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const enc = new TextEncoder();
+        const send = (entry: LogEntry) => {
+          try {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify(entry)}\n\n`));
+          } catch {
+            void 0;
+          }
+        };
+        for (const e of getRecentLogs()) send(e);
+        const unsub = subscribeLogs(send);
+        const ping = setInterval(() => {
+          try {
+            controller.enqueue(enc.encode(': ping\n\n'));
+          } catch {
+            void 0;
+          }
+        }, 15000);
+        const abort = c.req.raw.signal;
+        const cleanup = () => {
+          clearInterval(ping);
+          unsub();
+          try {
+            controller.close();
+          } catch {
+            void 0;
+          }
+        };
+        if (abort.aborted) cleanup();
+        else abort.addEventListener('abort', cleanup, { once: true });
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      },
+    });
+  });
+
   app.post('/api/chat/:agentId', async (c) => {
     const agentId = c.req.param('agentId');
     const params = await c.req.json<ChatRequestBody>();
@@ -262,24 +320,109 @@ async function main() {
       );
     }
     try {
+      const reqStartedAt = Date.now();
+      const reqId = `req_${reqStartedAt.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       console.log(
-        `[chat] bookId=${normalizedBookId} threadId=${normalizedThreadId} agent=${agentId}`,
+        `[chat:${reqId}] start agent=${agentId} bookId=${normalizedBookId} threadId=${normalizedThreadId} msgs=${Array.isArray(params.messages) ? params.messages.length : 0}`,
       );
       const { lineupId, agentDefs } = await resolveLineupAgentDefs(normalizedBookId);
       const requestAgents = createRuntimeAgents(agentDefs);
       console.log(
-        `[chat] lineup=${lineupId} agents=${AGENT_TYPES.map((type) => {
+        `[chat:${reqId}] lineup=${lineupId} agents=${AGENT_TYPES.map((type) => {
           const agentDef = agentDefs.get(type);
           return `${type}:${agentDef?.providerId ?? 'unknown'}/${agentDef?.model ?? 'unknown'}`;
         }).join(', ')}`,
       );
+
+      let chunkCount = 0;
+      let textChars = 0;
+      let firstChunkAt: number | null = null;
+      let stepCount = 0;
+
       const stream = await handleChatStream({
         mastra: createMastraInstance(requestAgents),
         agentId,
         params: {
           ...params,
-          requestContext: new RequestContext<AppRequestContextValues>([['bookId', normalizedBookId]]),
+          requestContext: new RequestContext<AppRequestContextValues>([
+            ['bookId', normalizedBookId],
+            ['parentThreadId', normalizedThreadId],
+          ]),
           memory: { thread: normalizedThreadId, resource: normalizedBookId },
+          onChunk: (chunk: unknown) => {
+            chunkCount += 1;
+            const c = chunk as { type?: string; payload?: { text?: string } } | undefined;
+            if (firstChunkAt === null) {
+              firstChunkAt = Date.now();
+              console.log(
+                `[chat:${reqId}] first-chunk type=${c?.type ?? 'unknown'} ttfb=${firstChunkAt - reqStartedAt}ms`,
+              );
+            }
+            if (c?.type === 'text-delta' && typeof c?.payload?.text === 'string') {
+              textChars += c.payload.text.length;
+            }
+          },
+          onStepFinish: (event: unknown) => {
+            stepCount += 1;
+            const step = event as
+              | {
+                  stepType?: string;
+                  toolCalls?: Array<{ payload?: { toolName?: string } }>;
+                  toolResults?: Array<{ payload?: { toolName?: string; isError?: boolean } }>;
+                  text?: string;
+                }
+              | undefined;
+            const calls = Array.isArray(step?.toolCalls)
+              ? step.toolCalls.map((t) => t?.payload?.toolName ?? '?').join(',')
+              : '';
+            const results = Array.isArray(step?.toolResults)
+              ? step.toolResults
+                  .map((r) => `${r?.payload?.toolName ?? '?'}${r?.payload?.isError ? '!' : ''}`)
+                  .join(',')
+              : '';
+            const textLen = typeof step?.text === 'string' ? step.text.length : 0;
+            console.log(
+              `[chat:${reqId}] step#${stepCount} type=${step?.stepType ?? 'unknown'}${calls ? ` calls=[${calls}]` : ''}${results ? ` results=[${results}]` : ''} textLen=${textLen}`,
+            );
+          },
+          onFinish: (event: unknown) => {
+            const result = event as
+              | { finishReason?: string; usage?: { totalTokens?: number } }
+              | undefined;
+            const elapsed = Date.now() - reqStartedAt;
+            console.log(
+              `[chat:${reqId}] done elapsed=${elapsed}ms chunks=${chunkCount} textChars=${textChars} steps=${stepCount} reason=${result?.finishReason ?? '?'} totalTokens=${result?.usage?.totalTokens ?? '?'}`,
+            );
+          },
+          onError: (event: unknown) => {
+            const e = (event as { error?: unknown })?.error ?? event;
+            if (e instanceof Error) {
+              console.error(`[chat:${reqId}] stream-error: ${e.message}`);
+              if (e.stack) console.error(`[chat:${reqId}] stack:\n${e.stack}`);
+              const cause = (e as { cause?: unknown }).cause;
+              if (cause) {
+                const causeMsg = cause instanceof Error ? `${cause.message}\n${cause.stack ?? ''}` : JSON.stringify(cause);
+                console.error(`[chat:${reqId}] cause:\n${causeMsg}`);
+              }
+            } else {
+              console.error(`[chat:${reqId}] stream-error:`, e);
+            }
+          },
+          delegation: {
+            onDelegationStart: (event: unknown) => {
+              const e = event as { primitiveId?: string; prompt?: string } | undefined;
+              const preview =
+                typeof e?.prompt === 'string' ? e.prompt.slice(0, 80).replace(/\s+/g, ' ') : '';
+              console.log(
+                `[chat:${reqId}] delegate→ ${e?.primitiveId ?? '?'}${preview ? ` prompt="${preview}${e?.prompt && e.prompt.length > 80 ? '…' : ''}"` : ''}`,
+              );
+            },
+            onDelegationComplete: (event: unknown) => {
+              const e = event as { primitiveId?: string; result?: { text?: string } } | undefined;
+              const len = typeof e?.result?.text === 'string' ? e.result.text.length : 0;
+              console.log(`[chat:${reqId}] delegate← ${e?.primitiveId ?? '?'} textLen=${len}`);
+            },
+          },
         },
         version: 'v6',
       });
@@ -287,6 +430,7 @@ async function main() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const status = err instanceof ChatRequestError ? 400 : 500;
+      console.error(`[chat] fatal: ${msg}`);
       return c.json({ error: msg }, status);
     }
   });
@@ -608,7 +752,16 @@ async function main() {
     const id = c.req.param('id');
     const book = await getBook(id);
     if (!book) return c.json({ error: 'not found' }, 404);
-    const tree = await getDocumentTree(id);
+    const rootIdRaw = c.req.query('rootId');
+    const depthRaw = c.req.query('depth');
+    const includeArchivedRaw = c.req.query('includeArchived');
+    const includeDeletedRaw = c.req.query('includeDeleted');
+    const tree = await getDocumentTree(id, {
+      rootId: rootIdRaw && rootIdRaw.length > 0 ? rootIdRaw : null,
+      depth: depthRaw !== undefined ? Number(depthRaw) : undefined,
+      includeArchived: includeArchivedRaw === 'true' || includeArchivedRaw === '1',
+      includeDeleted: includeDeletedRaw === 'true' || includeDeletedRaw === '1',
+    });
     return c.json({ book, tree });
   });
 
@@ -616,6 +769,34 @@ async function main() {
     const doc = await getDocument(c.req.param('id'));
     if (!doc) return c.json({ error: 'not found' }, 404);
     return c.json({ document: doc });
+  });
+
+  app.post('/api/documents/:id/archive', async (c) => {
+    const id = c.req.param('id');
+    const doc = await archiveDocument(id);
+    if (!doc) return c.json({ error: 'not found' }, 404);
+    return c.json({ document: doc });
+  });
+
+  app.post('/api/documents/:id/restore', async (c) => {
+    const id = c.req.param('id');
+    const doc = await restoreDocument(id);
+    if (!doc) return c.json({ error: 'not found' }, 404);
+    return c.json({ document: doc });
+  });
+
+  app.delete('/api/documents/:id', async (c) => {
+    const id = c.req.param('id');
+    const doc = await deleteDocument(id);
+    if (!doc) return c.json({ error: 'not found' }, 404);
+    return c.json({ document: doc });
+  });
+
+  app.post('/api/documents/:id/purge', async (c) => {
+    const id = c.req.param('id');
+    const ok = await purgeDocument(id);
+    if (!ok) return c.json({ error: 'not found' }, 404);
+    return c.json({ purged: true });
   });
 
   app.get('/api/threads', async (c) => {
@@ -631,14 +812,23 @@ async function main() {
   });
 
   app.post('/api/threads', async (c) => {
-    const body = (await c.req.json()) as { bookId?: unknown; title?: unknown };
+    const body = (await c.req.json()) as { bookId?: unknown; title?: unknown; agentId?: unknown };
     const bookId =
       typeof body.bookId === 'string' && body.bookId.trim() ? body.bookId.trim() : undefined;
     if (!bookId) return c.json({ error: '缺少 bookId' }, 400);
     const title =
       typeof body.title === 'string' && body.title.trim() ? body.title.trim() : '新会话';
+    const requestedAgentId =
+      typeof body.agentId === 'string' && body.agentId.trim() ? body.agentId.trim() : 'supervisor';
+    if (!AGENT_ORDER.includes(requestedAgentId as AgentMetadataId)) {
+      return c.json({ error: `invalid agentId: ${requestedAgentId}` }, 400);
+    }
     const memory = getMastraMemory();
-    const thread = await memory.createThread({ resourceId: bookId, title });
+    const thread = await memory.createThread({
+      resourceId: bookId,
+      title,
+      metadata: { agentId: requestedAgentId },
+    });
     return c.json({ thread });
   });
 
@@ -655,6 +845,20 @@ async function main() {
       thread: { ...existing, title, updatedAt: new Date() },
     });
     return c.json({ thread: saved });
+  });
+
+  app.get('/api/threads/:id/messages', async (c) => {
+    const id = c.req.param('id');
+    const memory = getMastraMemory();
+    const existing = await memory.getThreadById({ threadId: id });
+    if (!existing) return c.json({ error: 'not found' }, 404);
+    const result = await memory.recall({
+      threadId: id,
+      perPage: false,
+      orderBy: { field: 'createdAt', direction: 'ASC' },
+    });
+    const uiMessages = convertMessages(result.messages).to('AIV5.UI');
+    return c.json({ messages: uiMessages });
   });
 
   app.delete('/api/threads/:id', async (c) => {

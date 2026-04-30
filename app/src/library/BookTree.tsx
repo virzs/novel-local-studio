@@ -13,6 +13,9 @@ import {
   RiAddLine,
   RiPencilLine,
   RiDeleteBin6Line,
+  RiArchive2Line,
+  RiDeleteBinLine,
+  RiArrowGoBackLine,
 } from '@remixicon/react';
 import { makeLibraryApi, type Book, type DocumentKind, type DocumentNode } from './api';
 import { cn } from '@/lib/utils';
@@ -41,6 +44,13 @@ import {
   DialogTitle,
   DialogClose,
 } from '@/components/ui/dialog';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 
 const BOOK_FORM_ID = 'book-edit-form';
 
@@ -218,6 +228,8 @@ export function BookTree({
   const [tree, setTree] = useState<DocumentNode[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [showArchived, setShowArchived] = useState(false);
+  const [showDeleted, setShowDeleted] = useState(false);
 
   const [bookEditTarget, setBookEditTarget] = useState<
     { mode: 'create' } | { mode: 'edit'; book: Book } | null
@@ -227,8 +239,15 @@ export function BookTree({
   const [persisting, setPersisting] = useState(false);
   const [persistError, setPersistError] = useState<string | null>(null);
 
+  const [purgeTarget, setPurgeTarget] = useState<DocumentNode | null>(null);
+  const [purgeInput, setPurgeInput] = useState('');
+  const [purging, setPurging] = useState(false);
+
   const deleteConfirmable =
     deleteTarget !== null && deleteInput.trim() === deleteTarget.title;
+
+  const purgeConfirmable =
+    purgeTarget !== null && purgeInput.trim() === purgeTarget.title;
 
   useEffect(() => {
     (async () => {
@@ -251,14 +270,32 @@ export function BookTree({
     }
     (async () => {
       try {
-        const t = await api.getTree(activeBookId);
+        const t = await api.getTree(activeBookId, {
+          includeArchived: showArchived,
+          includeDeleted: showDeleted,
+        });
         setTree(t);
         setExpanded(new Set(collectFolderIds(t)));
       } catch (e) {
         setError(String(e));
       }
     })();
-  }, [api, activeBookId]);
+  }, [api, activeBookId, showArchived, showDeleted]);
+
+  BookTree.reloadTree = (bookId: string) => {
+    if (bookId !== activeBookId) return;
+    void (async () => {
+      try {
+        const t = await api.getTree(bookId, {
+          includeArchived: showArchived,
+          includeDeleted: showDeleted,
+        });
+        setTree(t);
+      } catch (e) {
+        setError(String(e));
+      }
+    })();
+  };
 
   function toggle(id: string) {
     setExpanded((prev) => {
@@ -273,6 +310,19 @@ export function BookTree({
     const bs = await api.listBooks();
     setBooks(bs);
     return bs;
+  }
+
+  async function reloadTree() {
+    if (!activeBookId) return;
+    try {
+      const t = await api.getTree(activeBookId, {
+        includeArchived: showArchived,
+        includeDeleted: showDeleted,
+      });
+      setTree(t);
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   async function handleBookSave(values: BookFormValues) {
@@ -323,6 +373,30 @@ export function BookTree({
       setPersistError(String(e));
     } finally {
       setPersisting(false);
+    }
+  }
+
+  async function handlePurgeConfirm() {
+    if (!purgeTarget) return;
+    setPurging(true);
+    try {
+      await api.purgeDocument(purgeTarget.id);
+      setPurgeTarget(null);
+      setPurgeInput('');
+      await reloadTree();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setPurging(false);
+    }
+  }
+
+  async function handleDocMutation(action: () => Promise<void>) {
+    try {
+      await action();
+      await reloadTree();
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -393,6 +467,38 @@ export function BookTree({
 
       {error && <div className="text-xs text-red-400">{error}</div>}
 
+      {activeBookId && (
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] uppercase tracking-wider text-neutral-600">视图</span>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={() => setShowArchived((v) => !v)}
+              className={cn(
+                'flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] transition-colors',
+                showArchived
+                  ? 'bg-neutral-800 text-neutral-100'
+                  : 'text-neutral-500 hover:text-neutral-300',
+              )}
+            >
+              <RiArchive2Line className="size-3" />
+              已归档
+            </button>
+            <button
+              onClick={() => setShowDeleted((v) => !v)}
+              className={cn(
+                'flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] transition-colors',
+                showDeleted
+                  ? 'bg-neutral-800 text-neutral-100'
+                  : 'text-neutral-500 hover:text-neutral-300',
+              )}
+            >
+              <RiDeleteBinLine className="size-3" />
+              回收站
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto -mx-1">
         {tree.length === 0 && !error && (
           <div className="text-xs text-neutral-600 px-2 py-3">暂无内容</div>
@@ -407,6 +513,12 @@ export function BookTree({
               selectedId={selectedDocId}
               onToggle={toggle}
               onSelect={onSelectDocument}
+              onMutate={handleDocMutation}
+              onPurge={(node) => {
+                setPurgeTarget(node);
+                setPurgeInput('');
+              }}
+              api={api}
             />
           ))}
         </ul>
@@ -527,6 +639,77 @@ export function BookTree({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={!!purgeTarget}
+        onOpenChange={(o) => {
+          if (!o) {
+            setPurgeTarget(null);
+            setPurgeInput('');
+          }
+        }}
+      >
+        <DialogContent className="max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>彻底删除文档</DialogTitle>
+          </DialogHeader>
+          {purgeTarget && (
+            <div className="space-y-3 text-sm">
+              <p className="text-neutral-300">
+                即将永久删除文档{' '}
+                <span className="font-medium text-red-400">{purgeTarget.title}</span>
+                。此操作不可恢复，所有子文档也会被一并删除。
+              </p>
+              <p className="text-xs text-muted-foreground">
+                请输入文档名称{' '}
+                <code className="text-neutral-300">{purgeTarget.title}</code>{' '}
+                以确认：
+              </p>
+              <input
+                type="text"
+                name="website"
+                className="sr-only"
+                tabIndex={-1}
+                aria-hidden="true"
+                autoComplete="off"
+              />
+              <Input
+                autoFocus
+                autoComplete="off"
+                data-1p-ignore
+                data-lpignore="true"
+                value={purgeInput}
+                onChange={(e) => setPurgeInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && purgeConfirmable) {
+                    e.preventDefault();
+                    void handlePurgeConfirm();
+                  }
+                }}
+                placeholder={purgeTarget.title}
+              />
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setPurgeTarget(null);
+                setPurgeInput('');
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!purgeConfirmable || purging}
+              onClick={() => void handlePurgeConfirm()}
+            >
+              <RiDeleteBinLine className="size-3.5" /> 彻底删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -543,6 +726,8 @@ function collectFolderIds(nodes: DocumentNode[]): string[] {
   return ids;
 }
 
+type LibraryApi = ReturnType<typeof makeLibraryApi>;
+
 function TreeNode({
   node,
   depth,
@@ -550,6 +735,9 @@ function TreeNode({
   selectedId,
   onToggle,
   onSelect,
+  onMutate,
+  onPurge,
+  api,
 }: {
   node: DocumentNode;
   depth: number;
@@ -557,33 +745,102 @@ function TreeNode({
   selectedId: string | null;
   onToggle: (id: string) => void;
   onSelect: (id: string) => void;
+  onMutate: (action: () => Promise<void>) => Promise<void>;
+  onPurge: (node: DocumentNode) => void;
+  api: LibraryApi;
 }) {
   const isFolder = node.kind === 'folder' || node.children.length > 0;
   const isOpen = expanded.has(node.id);
   const isSelected = node.id === selectedId;
+  const status = node.status ?? 'active';
+
+  const textClass = cn(
+    status === 'archived' && 'text-neutral-600',
+    status === 'deleted' && 'text-neutral-700 line-through',
+  );
 
   return (
     <li>
-      <button
-        onClick={() => {
-          if (isFolder) onToggle(node.id);
-          if (node.kind !== 'folder') onSelect(node.id);
-        }}
-        style={{ paddingLeft: `${8 + depth * 12}px` }}
-        className={`group w-full flex items-center gap-1.5 pr-2 py-1 rounded text-xs text-left transition-colors ${
-          isSelected
-            ? 'bg-neutral-800 text-neutral-100'
-            : 'text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200'
-        }`}
-      >
-        <KindIcon kind={node.kind} open={isOpen} />
-        <span className="truncate flex-1">{node.title}</span>
-        {node.kind !== 'folder' && node.wordCount > 0 && (
-          <span className="text-[10px] text-neutral-600 group-hover:text-neutral-500">
-            {node.wordCount}
-          </span>
-        )}
-      </button>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <button
+            onClick={() => {
+              if (isFolder) onToggle(node.id);
+              if (node.kind !== 'folder') onSelect(node.id);
+            }}
+            style={{ paddingLeft: `${8 + depth * 12}px` }}
+            className={cn(
+              'group w-full flex items-center gap-1.5 pr-2 py-1 rounded text-xs text-left transition-colors',
+              isSelected
+                ? 'bg-neutral-800 text-neutral-100'
+                : status === 'archived'
+                  ? 'text-neutral-600 hover:bg-neutral-900 hover:text-neutral-400'
+                  : status === 'deleted'
+                    ? 'text-neutral-700 hover:bg-neutral-900 hover:text-neutral-500'
+                    : 'text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200',
+            )}
+          >
+            <KindIcon kind={node.kind} open={isOpen} />
+            {status === 'archived' && (
+              <RiArchive2Line className="size-3 shrink-0 text-neutral-700" />
+            )}
+            {status === 'deleted' && (
+              <RiDeleteBinLine className="size-3 shrink-0 text-neutral-700" />
+            )}
+            <span className={cn('truncate flex-1', textClass)}>{node.title}</span>
+            {status === 'archived' && (
+              <span className="text-[10px] text-neutral-700 ml-1 shrink-0">(已归档)</span>
+            )}
+            {status === 'deleted' && (
+              <span className="text-[10px] text-red-900/70 ml-1 shrink-0">(已删除)</span>
+            )}
+            {node.kind !== 'folder' && node.wordCount > 0 && status === 'active' && (
+              <span className="text-[10px] text-neutral-600 group-hover:text-neutral-500">
+                {node.wordCount}
+              </span>
+            )}
+          </button>
+        </ContextMenuTrigger>
+        <ContextMenuContent className="w-40">
+          {status === 'active' && (
+            <>
+              <ContextMenuItem
+                onClick={() => void onMutate(() => api.archiveDocument(node.id))}
+                className="gap-2"
+              >
+                <RiArchive2Line className="size-3.5" />
+                归档
+              </ContextMenuItem>
+              <ContextMenuItem
+                onClick={() => void onMutate(() => api.softDeleteDocument(node.id))}
+                className="gap-2 text-red-400 focus:text-red-400"
+              >
+                <RiDeleteBin6Line className="size-3.5" />
+                删除
+              </ContextMenuItem>
+            </>
+          )}
+          {(status === 'archived' || status === 'deleted') && (
+            <>
+              <ContextMenuItem
+                onClick={() => void onMutate(() => api.restoreDocument(node.id))}
+                className="gap-2"
+              >
+                <RiArrowGoBackLine className="size-3.5" />
+                还原
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                onClick={() => onPurge(node)}
+                className="gap-2 text-red-400 focus:text-red-400"
+              >
+                <RiDeleteBinLine className="size-3.5" />
+                彻底删除
+              </ContextMenuItem>
+            </>
+          )}
+        </ContextMenuContent>
+      </ContextMenu>
       {isFolder && isOpen && node.children.length > 0 && (
         <ul className="space-y-0.5">
           {node.children.map((c) => (
@@ -595,6 +852,9 @@ function TreeNode({
               selectedId={selectedId}
               onToggle={onToggle}
               onSelect={onSelect}
+              onMutate={onMutate}
+              onPurge={onPurge}
+              api={api}
             />
           ))}
         </ul>
@@ -618,3 +878,7 @@ function KindIcon({ kind, open }: { kind: DocumentKind; open: boolean }) {
       return <RiStickyNoteLine className={cls} />;
   }
 }
+
+BookTree.reloadTree = (_bookId: string): void => {
+  void 0;
+};

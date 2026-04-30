@@ -2,8 +2,9 @@ import { Agent } from '@mastra/core/agent';
 import { registry } from '../llm/providers.ts';
 import type { AgentDef, AgentType } from '../llm/bindings.ts';
 import { getBuiltinAgent } from './agents-cache.ts';
-import { readOnlyDocumentTools, createDocumentTool, updateDocumentTool } from '../tools/documents.ts';
+import { readOnlyDocumentTools, createDocumentTool, createFolderTool, updateDocumentTool, archiveDocumentTool, restoreDocumentTool } from '../tools/documents.ts';
 import { searchTools } from '../tools/search.ts';
+import { getMastraMemory } from '../db/mastra-store.ts';
 
 export type SubagentType = Exclude<AgentType, 'supervisor'>;
 
@@ -15,10 +16,11 @@ const defaultAgentDefResolver: AgentDefResolver = (type) => getBuiltinAgent(type
 
 const subagentDescriptions: Record<SubagentType, string> = {
   architect:
-    'Plans novel structure: outlines, arcs, pacing, chapter breakdown. Produces structural plans only, does not write prose.',
+    'Plans novel structure (outlines, arcs, pacing) AND creates/updates setting-layer documents: characters, settings, places, factions, timelines, terminology.',
   chronicler: 'Drafts chapter prose based on structural plans. Writes narrative text.',
   editor: 'Polishes and rewrites prose for style, clarity, continuity.',
-  loreKeeper: 'Maintains world-building: characters, settings, timelines, terminology.',
+  loreKeeper:
+    'Consistency checker and library organizer. Verifies names/places/timelines/rules across documents and reports conflicts; may make small consistency-fix edits via updateDocument. Also reorganizes misplaced setting-layer documents into proper category folders (creates folders via createFolder, moves docs via updateDocument(parentId)). Does NOT create new setting/chapter/outline content documents.',
 };
 
 const subagentNames: Record<SubagentType, string> = {
@@ -39,8 +41,12 @@ export function createArchitectAgent(resolveAgentDef: AgentDefResolver = default
       ...readOnlyDocumentTools,
       ...searchTools,
       createDocument: createDocumentTool,
+      createFolder: createFolderTool,
       updateDocument: updateDocumentTool,
+      archiveDocument: archiveDocumentTool,
+      restoreDocument: restoreDocumentTool,
     },
+    memory: () => getMastraMemory(),
   });
 }
 
@@ -56,6 +62,7 @@ export function createChroniclerAgent(resolveAgentDef: AgentDefResolver = defaul
       ...searchTools,
       updateDocument: updateDocumentTool,
     },
+    memory: () => getMastraMemory(),
   });
 }
 
@@ -71,6 +78,7 @@ export function createEditorAgent(resolveAgentDef: AgentDefResolver = defaultAge
       ...searchTools,
       updateDocument: updateDocumentTool,
     },
+    memory: () => getMastraMemory(),
   });
 }
 
@@ -84,7 +92,12 @@ export function createLoreKeeperAgent(resolveAgentDef: AgentDefResolver = defaul
     tools: {
       ...readOnlyDocumentTools,
       ...searchTools,
+      createFolder: createFolderTool,
+      updateDocument: updateDocumentTool,
+      archiveDocument: archiveDocumentTool,
+      restoreDocument: restoreDocumentTool,
     },
+    memory: () => getMastraMemory(),
   });
 }
 
