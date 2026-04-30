@@ -130,4 +130,8 @@
     font-family: var(--font-sans);
     font-feature-settings: "cv11", "ss01";
   }
+
+  [data-status="running"] + span {
+    display: none;
+  }
 }
