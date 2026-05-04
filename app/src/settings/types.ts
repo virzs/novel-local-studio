@@ -1,4 +1,4 @@
-export type ProviderKind = 'openai' | 'openai-compatible';
+export type ProviderKind = 'openai' | 'openai-compatible' | 'local-onnx';
 
 export type ProviderConfig = {
   id: string;
@@ -8,6 +8,7 @@ export type ProviderConfig = {
   apiKey?: string;
   headers?: Record<string, string>;
   models?: string[];
+  cacheDir?: string;
 };
 
 export type ModelBinding = {

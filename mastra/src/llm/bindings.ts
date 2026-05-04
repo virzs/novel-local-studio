@@ -1,5 +1,6 @@
 import { getLibSqlClient } from '../db/libsql.ts';
 import { registry, type Bindings, type ProviderConfig } from './providers.ts';
+import { DEFAULT_LOCAL_EMBEDDING_PRESET } from './embedding-presets.ts';
 import { setBindings } from '../agents/bindings-cache.ts';
 import { setAgents } from '../agents/agents-cache.ts';
 
@@ -261,7 +262,15 @@ export const BUILTIN_AGENT_DEFS: Omit<AgentDef, 'createdAt' | 'updatedAt'>[] = [
 
 export const DEFAULT_LINEUP_ID = 'default';
 
+export const LOCAL_PROVIDER_ID = 'local-default';
+
 export const DEFAULT_PROVIDERS: ProviderConfig[] = [
+  {
+    id: LOCAL_PROVIDER_ID,
+    kind: 'local-onnx',
+    label: '本地 ONNX 嵌入',
+    models: [DEFAULT_LOCAL_EMBEDDING_PRESET.modelId],
+  },
   {
     id: 'openai-default',
     kind: 'openai',
@@ -272,9 +281,9 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
 
 export const DEFAULT_BINDINGS: Bindings = {
   embedding: {
-    providerId: 'openai-default',
-    model: 'text-embedding-3-small',
-    dimension: 1536,
+    providerId: LOCAL_PROVIDER_ID,
+    model: DEFAULT_LOCAL_EMBEDDING_PRESET.modelId,
+    dimension: DEFAULT_LOCAL_EMBEDDING_PRESET.dimension,
   },
 };
 
@@ -294,9 +303,19 @@ async function writeKv(key: string, value: unknown): Promise<void> {
   });
 }
 
+const BUILTIN_PROVIDER_IDS = new Set(['local-default']);
+
+function withBuiltinProviders(providers: ProviderConfig[]): ProviderConfig[] {
+  const present = new Set(providers.map((p) => p.id));
+  const missing = DEFAULT_PROVIDERS.filter(
+    (p) => BUILTIN_PROVIDER_IDS.has(p.id) && !present.has(p.id),
+  );
+  return missing.length === 0 ? providers : [...missing, ...providers];
+}
+
 export async function loadProviders(): Promise<ProviderConfig[]> {
   const stored = await readKv<ProviderConfig[]>(PROVIDERS_KEY);
-  if (stored && stored.length > 0) return stored;
+  if (stored && stored.length > 0) return withBuiltinProviders(stored);
   await writeKv(PROVIDERS_KEY, DEFAULT_PROVIDERS);
   return DEFAULT_PROVIDERS;
 }
@@ -314,8 +333,9 @@ export async function reloadRegistry(): Promise<void> {
 }
 
 export async function saveProviders(providers: ProviderConfig[]): Promise<void> {
-  await writeKv(PROVIDERS_KEY, providers);
-  registry.reload(providers);
+  const merged = withBuiltinProviders(providers);
+  await writeKv(PROVIDERS_KEY, merged);
+  registry.reload(merged);
 }
 
 export async function saveBindings(bindings: Bindings): Promise<void> {

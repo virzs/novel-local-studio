@@ -21,6 +21,11 @@ const NATIVE_EXTERNALS = [
   '@libsql/linux-arm-gnueabihf',
   '@libsql/linux-arm-musleabihf',
   '@libsql/win32-x64-msvc',
+  'onnxruntime-node',
+  'onnxruntime-common',
+  '@huggingface/transformers',
+  'sharp',
+  'protobufjs',
 ];
 
 async function main() {

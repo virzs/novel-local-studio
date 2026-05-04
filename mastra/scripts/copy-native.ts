@@ -14,7 +14,13 @@ const RESOLVERS = [
   createRequire(path.join(REPO_ROOT, 'package.json')),
 ];
 
-const RUNTIME_NATIVE_MODULES = ['better-sqlite3', 'libsql'];
+const RUNTIME_NATIVE_MODULES = [
+  'better-sqlite3',
+  'libsql',
+  'onnxruntime-node',
+  '@huggingface/transformers',
+  'sharp',
+];
 
 const LIBSQL_PLATFORM_PACKAGES = [
   '@libsql/darwin-arm64',

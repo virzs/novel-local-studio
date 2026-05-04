@@ -12,7 +12,7 @@ import {
   RiErrorWarningLine,
   RiDownloadCloud2Line,
 } from '@remixicon/react';
-import type { ProviderConfig, ProviderKind } from '../types';
+import type { ProviderConfig } from '../types';
 import { makeConfigApi } from '../api';
 import type { TestState } from './_shared';
 import { Button } from '@/components/ui/button';
@@ -72,10 +72,16 @@ function makeProviderSchema(existingIds: string[], mode: 'add' | 'edit', current
   });
 }
 
+type ProviderFormKind = 'openai' | 'openai-compatible';
+
+function toFormKind(kind: 'openai' | 'openai-compatible' | 'local-onnx'): ProviderFormKind {
+  return kind !== 'local-onnx' ? kind : 'openai';
+}
+
 type ProviderFormValues = {
   id: string;
   label: string;
-  kind: ProviderKind;
+  kind: ProviderFormKind;
   baseUrl?: string;
   apiKey?: string;
 };
@@ -572,7 +578,7 @@ export function ProvidersTab({
       ? {
           id: providers[editTarget.idx].id,
           label: providers[editTarget.idx].label,
-          kind: providers[editTarget.idx].kind,
+          kind: toFormKind(providers[editTarget.idx].kind),
           baseUrl: providers[editTarget.idx].baseUrl ?? '',
           apiKey: '',
         }

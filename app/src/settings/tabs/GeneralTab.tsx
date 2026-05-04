@@ -24,9 +24,21 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { ModelCombobox } from './_shared';
 import type { Bindings, ProviderConfig } from '../types';
 import { makeConfigApi } from '../api';
+import {
+  LOCAL_EMBEDDING_PRESETS,
+  DEFAULT_LOCAL_EMBEDDING_PRESET,
+  findLocalEmbeddingPreset,
+} from '../embedding-presets';
 
 const EMBEDDING_FORM_ID = 'embedding-edit-form';
 
@@ -50,6 +62,21 @@ function makeEmbeddingSchema(providerIds: string[]) {
   });
 }
 
+function resolveDefaultEmbeddingValues(
+  values: EmbeddingFormValues,
+  providers: ProviderConfig[],
+): EmbeddingFormValues {
+  const provider = providers.find((p) => p.id === values.providerId);
+  if (provider?.kind === 'local-onnx' && !findLocalEmbeddingPreset(values.model)) {
+    return {
+      ...values,
+      model: DEFAULT_LOCAL_EMBEDDING_PRESET.modelId,
+      dimension: DEFAULT_LOCAL_EMBEDDING_PRESET.dimension,
+    };
+  }
+  return values;
+}
+
 function EmbeddingEditForm({
   defaultValues,
   providers,
@@ -64,62 +91,146 @@ function EmbeddingEditForm({
   const providerIds = providers.map((p) => p.id);
   const schema = useMemo(() => makeEmbeddingSchema(providerIds), [providerIds]);
 
+  const resolvedDefaults = resolveDefaultEmbeddingValues(defaultValues, providers);
+
   const form = useForm<EmbeddingFormValues>({
     resolver: zodResolver(schema),
-    defaultValues,
+    defaultValues: resolvedDefaults,
   });
 
   const watchedProviderId = form.watch('providerId');
   const watchedModel = form.watch('model');
-  const selectedProviderLabel = providers.find((p) => p.id === watchedProviderId)?.label;
+  const selectedProvider = providers.find((p) => p.id === watchedProviderId);
+  const isLocalOnnx = selectedProvider?.kind === 'local-onnx';
 
-  const allModelGroups = providers.map((p) => ({
-    providerId: p.id,
-    providerLabel: p.label,
-    models: p.models ?? [],
-  }));
+  const activePreset = isLocalOnnx
+    ? (findLocalEmbeddingPreset(watchedModel) ?? DEFAULT_LOCAL_EMBEDDING_PRESET)
+    : null;
+
+  const nonLocalModelGroups = providers
+    .filter((p) => p.kind !== 'local-onnx')
+    .map((p) => ({
+      providerId: p.id,
+      providerLabel: p.label,
+      models: p.models ?? [],
+    }));
+
+  function handleProviderChange(pid: string) {
+    form.setValue('providerId', pid, { shouldValidate: true });
+    const next = providers.find((p) => p.id === pid);
+    if (next?.kind === 'local-onnx') {
+      form.setValue('model', DEFAULT_LOCAL_EMBEDDING_PRESET.modelId, { shouldValidate: true });
+      form.setValue('dimension', DEFAULT_LOCAL_EMBEDDING_PRESET.dimension, { shouldValidate: true });
+    } else {
+      form.setValue('model', '', { shouldValidate: false });
+      form.setValue('dimension', 1536, { shouldValidate: false });
+    }
+  }
+
+  function handleLocalPresetChange(modelId: string) {
+    const preset = findLocalEmbeddingPreset(modelId) ?? DEFAULT_LOCAL_EMBEDDING_PRESET;
+    form.setValue('model', preset.modelId, { shouldValidate: true });
+    form.setValue('dimension', preset.dimension, { shouldValidate: true });
+  }
 
   return (
     <Form {...form}>
       <form id={EMBEDDING_FORM_ID} onSubmit={form.handleSubmit(onValid)} className="space-y-4">
         <FormItem>
-          <FormLabel>服务商 / 模型</FormLabel>
-          <ModelCombobox
-            value={watchedModel}
-            providerId={watchedProviderId}
-            groups={allModelGroups}
-            onProviderChange={(pid) => form.setValue('providerId', pid, { shouldValidate: true })}
-            onChange={(m) => form.setValue('model', m, { shouldValidate: true })}
-            api={api}
-          />
-          {selectedProviderLabel && (
-            <p className="text-xs text-neutral-500">{selectedProviderLabel}</p>
-          )}
+          <FormLabel>服务商</FormLabel>
+          <Select value={watchedProviderId} onValueChange={handleProviderChange}>
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="请选择服务商" />
+            </SelectTrigger>
+            <SelectContent>
+              {providers.map((p) => (
+                <SelectItem key={p.id} value={p.id}>
+                  {p.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           {form.formState.errors.providerId && (
             <p className="text-sm text-destructive">{form.formState.errors.providerId.message}</p>
           )}
-          {form.formState.errors.model && (
-            <p className="text-sm text-destructive">{form.formState.errors.model.message}</p>
-          )}
         </FormItem>
 
-        <FormField
-          control={form.control}
-          name="dimension"
-          render={({ field }) => (
+        {isLocalOnnx ? (
+          <>
             <FormItem>
-              <FormLabel>维度</FormLabel>
-              <FormControl>
-                <Input
-                  {...field}
-                  type="number"
-                  onChange={(e) => field.onChange(e.target.valueAsNumber)}
-                />
-              </FormControl>
-              <FormMessage />
+              <FormLabel>模型</FormLabel>
+              <Select value={watchedModel} onValueChange={handleLocalPresetChange}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="请选择模型" />
+                </SelectTrigger>
+                <SelectContent>
+                  {LOCAL_EMBEDDING_PRESETS.map((preset) => (
+                    <SelectItem key={preset.modelId} value={preset.modelId}>
+                      {preset.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {form.formState.errors.model && (
+                <p className="text-sm text-destructive">{form.formState.errors.model.message}</p>
+              )}
             </FormItem>
-          )}
-        />
+
+            <FormField
+              control={form.control}
+              name="dimension"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>维度</FormLabel>
+                  <FormControl>
+                    <Input {...field} type="number" disabled />
+                  </FormControl>
+                  {activePreset && (
+                    <p className="text-xs text-muted-foreground">
+                      首次使用会自动下载模型（约 {activePreset.approxSizeMB} MB），切换维度会重建全部嵌入索引。
+                    </p>
+                  )}
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </>
+        ) : (
+          <>
+            <FormItem>
+              <FormLabel>模型</FormLabel>
+              <ModelCombobox
+                value={watchedModel}
+                providerId={watchedProviderId}
+                groups={nonLocalModelGroups}
+                onProviderChange={(pid) => form.setValue('providerId', pid, { shouldValidate: true })}
+                onChange={(m) => form.setValue('model', m, { shouldValidate: true })}
+                api={api}
+              />
+              {form.formState.errors.model && (
+                <p className="text-sm text-destructive">{form.formState.errors.model.message}</p>
+              )}
+            </FormItem>
+
+            <FormField
+              control={form.control}
+              name="dimension"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>维度</FormLabel>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      type="number"
+                      onChange={(e) => field.onChange(e.target.valueAsNumber)}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </>
+        )}
       </form>
     </Form>
   );

@@ -1,8 +1,12 @@
 import { createOpenAI, type OpenAIProvider } from '@ai-sdk/openai';
 import type { EmbeddingModel } from 'ai';
 import type { MastraModelConfig } from '@mastra/core/llm';
+import {
+  getLocalEmbeddingModel,
+  type LocalEmbeddingModel,
+} from './local-embedding.ts';
 
-export type ProviderKind = 'openai' | 'openai-compatible';
+export type ProviderKind = 'openai' | 'openai-compatible' | 'local-onnx';
 
 export type ProviderConfig = {
   id: string;
@@ -12,6 +16,7 @@ export type ProviderConfig = {
   apiKey?: string;
   headers?: Record<string, string>;
   models?: string[];
+  cacheDir?: string;
 };
 
 export type ModelBinding = {
@@ -25,8 +30,19 @@ export type Bindings = {
   embedding: EmbeddingBinding;
 };
 
+type RegisteredProvider =
+  | {
+      kind: 'openai' | 'openai-compatible';
+      config: ProviderConfig;
+      sdk: OpenAIProvider;
+    }
+  | {
+      kind: 'local-onnx';
+      config: ProviderConfig;
+    };
+
 class ProviderRegistry {
-  private providers = new Map<string, OpenAIProvider>();
+  private providers = new Map<string, RegisteredProvider>();
 
   reload(configs: ProviderConfig[]): void {
     this.providers.clear();
@@ -34,28 +50,44 @@ class ProviderRegistry {
       switch (c.kind) {
         case 'openai':
         case 'openai-compatible': {
-          const provider = createOpenAI({
+          const sdk = createOpenAI({
             baseURL: c.baseUrl,
             apiKey: c.apiKey,
             headers: c.headers,
           });
-          this.providers.set(c.id, provider);
+          this.providers.set(c.id, { kind: c.kind, config: c, sdk });
+          break;
+        }
+        case 'local-onnx': {
+          this.providers.set(c.id, { kind: 'local-onnx', config: c });
           break;
         }
       }
     }
   }
 
+  getConfig(providerId: string): ProviderConfig | undefined {
+    return this.providers.get(providerId)?.config;
+  }
+
   getLanguageModel(binding: ModelBinding): MastraModelConfig {
     const p = this.providers.get(binding.providerId);
     if (!p) throw new Error(`provider not configured: ${binding.providerId}`);
-    return p.chat(binding.model) as MastraModelConfig;
+    if (p.kind === 'local-onnx') {
+      throw new Error(
+        `provider ${binding.providerId} (local-onnx) does not support language models`,
+      );
+    }
+    return p.sdk.chat(binding.model) as MastraModelConfig;
   }
 
-  getEmbeddingModel(binding: ModelBinding): EmbeddingModel {
+  getEmbeddingModel(binding: ModelBinding): EmbeddingModel | LocalEmbeddingModel {
     const p = this.providers.get(binding.providerId);
     if (!p) throw new Error(`provider not configured: ${binding.providerId}`);
-    return p.textEmbeddingModel(binding.model);
+    if (p.kind === 'local-onnx') {
+      return getLocalEmbeddingModel(p.config, binding.model);
+    }
+    return p.sdk.textEmbeddingModel(binding.model);
   }
 }
 

@@ -17,7 +17,10 @@ import { installConsoleCapture, getRecentLogs, subscribeLogs, type LogEntry } fr
 installConsoleCapture();
 import { initLibSqlClient, runBusinessMigrations, getDbPath } from './db/libsql.ts';
 import { initFtsDb, setupFtsSchema, backfillFts, closeFtsDb } from './db/fts.ts';
-import { initVectorStore, getVectorStore, ensureNovelIndex, VECTOR_DIMENSION } from './db/vector.ts';
+import { initVectorStore, getVectorStore } from './db/vector.ts';
+import { embeddingCoordinator } from './rag/embedding-coordinator.ts';
+import { localModelManager, setLocalEmbeddingDataDir, getLocalEmbeddingModel } from './llm/local-embedding.ts';
+import { LOCAL_EMBEDDING_PRESETS } from './llm/embedding-presets.ts';
 import {
   listBooks,
   getBook,
@@ -55,7 +58,6 @@ import { allAgents, createRuntimeAgents, setBindings } from './agents/index.ts';
 import {
   embedDocumentByIdSafe,
   deleteDocumentEmbeddings,
-  backfillEmbeddings,
 } from './rag/embeddings.ts';
 
 type AgentMetadataId = 'supervisor' | 'architect' | 'chronicler' | 'editor' | 'loreKeeper';
@@ -206,6 +208,8 @@ async function main() {
   initLibSqlClient(dataDir);
   await runBusinessMigrations();
 
+  setLocalEmbeddingDataDir(dataDir);
+
   initFtsDb();
   setupFtsSchema();
 
@@ -213,7 +217,6 @@ async function main() {
   backfillFts();
 
   initVectorStore();
-  await ensureNovelIndex();
 
   await reloadRegistry();
 
@@ -233,9 +236,7 @@ async function main() {
     },
   });
 
-  void backfillEmbeddings()
-    .then((r) => console.log(`[embed] backfill: embedded=${r.embedded} skipped=${r.skipped} failed=${r.failed}`))
-    .catch((e) => console.warn('[embed] backfill error:', (e as Error).message));
+  void embeddingCoordinator.scheduleRebuild('startup');
 
   const app = new Hono();
   app.use('*', cors());
@@ -246,10 +247,20 @@ async function main() {
       status: 'ok',
       startedAt,
       dbPath: getDbPath(),
-      vectorDimension: VECTOR_DIMENSION,
+      vectorDimension: embeddingCoordinator.getStatus().dimension,
       agents: Object.keys(allAgents),
     }),
   );
+
+  app.get('/api/embedding-status', (c) => {
+    const rebuild = embeddingCoordinator.getStatus();
+    const local = localModelManager.listProgress();
+    return c.json({
+      rebuild,
+      localModels: local,
+      presets: LOCAL_EMBEDDING_PRESETS,
+    });
+  });
 
   app.get('/api/logs', (c) => {
     const sinceParam = c.req.query('since');
@@ -465,18 +476,55 @@ async function main() {
     ) {
       return c.json({ error: 'invalid embedding binding' }, 400);
     }
+    const prev = await loadBindings();
     await saveBindings(body.bindings);
-    return c.json({ ok: true });
+    const changed =
+      prev.embedding.providerId !== emb.providerId ||
+      prev.embedding.model !== emb.model ||
+      prev.embedding.dimension !== emb.dimension;
+    if (changed) {
+      void embeddingCoordinator.scheduleRebuild(
+        `binding-changed:${prev.embedding.providerId}/${prev.embedding.model}/${prev.embedding.dimension}→${emb.providerId}/${emb.model}/${emb.dimension}`,
+      );
+    }
+    return c.json({ ok: true, rebuildScheduled: changed });
   });
 
   app.post('/api/config/test', async (c) => {
     const body = (await c.req.json()) as {
       providerId?: string;
       model: string;
-      provider?: { baseUrl?: string; apiKey?: string; headers?: Record<string, string> };
+      provider?: { baseUrl?: string; apiKey?: string; headers?: Record<string, string>; kind?: string };
     };
     if (!body?.model) {
       return c.json({ error: 'model required' }, 400);
+    }
+
+    const isLocal =
+      body.provider?.kind === 'local-onnx' ||
+      (body.providerId
+        ? (await loadProviderConfig(body.providerId))?.kind === 'local-onnx'
+        : false);
+    if (isLocal) {
+      try {
+        const providerConfig =
+          body.providerId && (await loadProviderConfig(body.providerId));
+        if (!providerConfig) {
+          return c.json({ ok: false, error: 'local provider not found' }, 404);
+        }
+        const local = getLocalEmbeddingModel(providerConfig, body.model);
+        const result = await local.doEmbed({
+          values: ['ping'],
+          abortSignal: undefined as never,
+        });
+        return c.json({
+          ok: true,
+          text: `embedding ok: dim=${result.embeddings[0]?.length ?? 0}`,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+      }
     }
 
     try {
@@ -511,8 +559,20 @@ async function main() {
   app.post('/api/config/providers/models', async (c) => {
     const body = (await c.req.json()) as {
       providerId?: string;
-      provider?: { baseUrl?: string; apiKey?: string; headers?: Record<string, string> };
+      provider?: { baseUrl?: string; apiKey?: string; headers?: Record<string, string>; kind?: string };
     };
+
+    const isLocal =
+      body?.provider?.kind === 'local-onnx' ||
+      (body?.providerId
+        ? (await loadProviderConfig(body.providerId))?.kind === 'local-onnx'
+        : false);
+    if (isLocal) {
+      return c.json({
+        ok: true,
+        models: LOCAL_EMBEDDING_PRESETS.map((p) => p.modelId),
+      });
+    }
 
     let baseUrl: string | undefined;
     let apiKey: string | undefined;

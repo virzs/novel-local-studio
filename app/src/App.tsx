@@ -13,6 +13,7 @@ import { ThreadList } from './library/ThreadList';
 import { DocumentReader } from './library/DocumentReader';
 import { LogsModal } from './library/LogsModal';
 import { SplashScreen } from './splash/SplashScreen';
+import { EmbeddingStatusBar } from './components/EmbeddingStatusBar';
 import { isBrowserMode, type ServerInfo } from './lib/serverInfo';
 import {
   makeLibraryApi,
@@ -174,6 +175,11 @@ export function App() {
         <SettingsModal backendUrl={info.url} onClose={() => setSettingsOpen(false)} />
       )}
       {logsOpen && <LogsModal backendUrl={info.url} onClose={() => setLogsOpen(false)} />}
+      <div className="fixed bottom-0 left-0 right-0 z-40 pointer-events-none">
+        <div className="pointer-events-auto">
+          <EmbeddingStatusBar backendUrl={info.url} />
+        </div>
+      </div>
     </div>
   );
 }
